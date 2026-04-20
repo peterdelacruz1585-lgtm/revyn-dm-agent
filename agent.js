@@ -225,5 +225,16 @@ app.post('/webhook', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Revyn DM Agent is live'));
 
+
+app.get('/privacy', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send('<!DOCTYPE html><html><head><title>Privacy Policy - Chia Beauty Room</title></head><body style="font-family:sans-serif;max-width:800px;margin:40px auto;padding:0 20px;"><h1>Privacy Policy</h1><p><strong>Last updated: April 19, 2026</strong></p><p>This policy applies to the Chia Beauty Room Instagram messaging assistant operated by Revyn.</p><h2>Information We Collect</h2><p>When you message Chia Beauty Room on Instagram, we receive your Instagram user ID and message content to respond to your service inquiries.</p><h2>How We Use Information</h2><p>Message content is used solely to respond to inquiries and notify the salon when a booking opportunity arises. We do not sell or share your information.</p><h2>Data Retention</h2><p>Conversation data is held in memory only for active sessions and is not permanently stored.</p><h2>Contact</h2><p>Chia Beauty Room, 1483 NJ-27 Suite 3, Somerset, NJ 08873<br>Email: chiabeautyroom@gmail.com | Phone: (609) 746-0092</p></body></html>');
+});
+
+app.get('/data-deletion', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send('<!DOCTYPE html><html><head><title>Data Deletion - Chia Beauty Room</title></head><body style="font-family:sans-serif;max-width:800px;margin:40px auto;padding:0 20px;"><h1>Data Deletion Request</h1><p>To request deletion of data associated with your Instagram account, email chiabeautyroom@gmail.com with subject "Data Deletion Request". All data will be removed within 30 days.</p></body></html>');
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Agent running on port ' + PORT));
