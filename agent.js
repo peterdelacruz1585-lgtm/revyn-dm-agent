@@ -23,7 +23,9 @@ Phone: (609) 746-0092
 
 LANGUAGE: If someone messages in Spanish, respond fully in Spanish for the entire conversation.
 
-TONE: Casual, warm, real. Like a friend who works at the salon. Short messages. Never robotic. No bullet points. Never say "Great question", "Absolutely", "Of course", "Certainly". Always end with one question to keep the convo moving. Use emojis sparingly — only when it feels natural.
+TONE: Casual, warm, real. Like a friend who works at the salon. Never robotic. No bullet points. Never say "Great question", "Absolutely", "Of course", "Certainly". Always end with one question to keep the convo moving. Use emojis sparingly — only when it feels natural.
+
+RESPONSE LENGTH: Keep every message under 2 sentences. Never more than 25 words. Short and natural — like a real text.
 
 SERVICES & PRICING:
 K-Tip Extensions: $799 total. ~5 hours. Includes 100% human hair, professional install, cut and style. No hidden fees. Color add-on only if needed (we carry tons of shades, most covered). Lasts 3–6 months.
@@ -53,7 +55,9 @@ Deposit collected at booking through GlossGenius link.
 AVAILABILITY:
 You cannot see the live calendar. When someone asks about a specific date or time, say you'll check with Evelin and get back to them, then trigger NEEDS_HUMAN.
 
-LEAD QUALIFICATION — collect naturally, 1-2 questions at a time, never like a form:
+LEAD QUALIFICATION — collect naturally, 1 question at a time:
+FIRST — before anything else, get their name and phone number. Say: "What's your name and best number to reach you? We like to follow up by phone to make sure we get you the right info 😊"
+Once you have name and phone:
 1. What they're interested in
 2. Current hair (length, thickness)
 3. Their goal (length, volume, or both)
@@ -114,6 +118,8 @@ async function sendAlert(message) {
 }
 
 async function sendMessage(recipientId, message) {
+  const delay = Math.floor(Math.random() * 6000) + 4000; // 4–10 second human-like delay
+  await new Promise(resolve => setTimeout(resolve, delay));
   try {
     await axios.post('https://graph.facebook.com/v19.0/me/messages', {
       recipient: { id: recipientId },
@@ -135,7 +141,7 @@ async function getAIResponse(userId, userMessage) {
   try {
     const response = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 300,
+      max_tokens: 150,
       system: SYSTEM_PROMPT,
       messages: conversations[userId]
     });
@@ -179,6 +185,10 @@ app.post('/webhook', async (req, res) => {
       const messageText = event.message?.text;
       if (!senderId || !messageText || event.message?.is_echo) continue;
       console.log('DM from ' + senderId + ': ' + messageText);
+      const phonePattern = /(\+?1?\s?)?(\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4})/;
+      if (phonePattern.test(messageText)) {
+        await sendAlert('📞 PHONE NUMBER DROPPED\n\nIG ID: ' + senderId + '\nMessage: ' + messageText + '\n\nCall them now!');
+      }
       const reply = await getAIResponse(senderId, messageText);
       await sendMessage(senderId, reply);
       console.log('Replied: ' + reply);
