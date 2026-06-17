@@ -116,10 +116,10 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function delayForReply(text) {
   const n = text.length;
-  if (n < 80) return 5000;
-  if (n < 200) return 12000;
-  if (n < 350) return 20000;
-  return 30000;
+  if (n < 80) return 20000;
+  if (n < 200) return 30000;
+  if (n < 350) return 38000;
+  return 45000;
 }
 
 async function sendSenderAction(recipientId, action) {
