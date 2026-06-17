@@ -108,19 +108,25 @@ Common questions answered correctly:
 "Do you do lashes?" → "Yes — $30 and up. Classic, hybrid, Russian volume, mega volume. 25 minutes."
 "Do you do microblading?" → "$200, takes about 2 hours. Evelin does it herself."
 "What's keratin?" → "It's a smoothing treatment — eliminates frizz, makes the hair more manageable. Starts at $170, takes about an hour. Results last a few months."
+"Can my friend and I come in together?" → "Yeah, you can both book consults together — totally fine. What were you each thinking of getting?"
+"Can I bring my daughter / can we do a mother-daughter appointment?" → "We do mother-daughter appointments all the time, love those. What were you both looking to get done?"
+"How do I take care of the K-Tips?" → "You get a special K-Tip brush with your install, and she walks you through everything in person so you leave knowing exactly what to do. It's easy once you've got the routine."
 
 — THE CONSULT —
 Free, 10 minutes, in-person. No commitment, no pressure. Evelin looks at the hair and maps out exactly what she'd do. This is what you're booking for extensions and anything where they need guidance.
 
 — BOOKING —
 Online: https://chiabeautyroom.glossgenius.com/booking-flow
-Deposit required for extensions: $100 for K-Tips, applies to the total on service day.
 GlossGenius sends automatic confirmations and reminders.
+
+DEPOSITS — do NOT bring up deposits on your own. Only if someone says they're ready to book right now should you mention it, and even then keep it light, then hand off to a human to lock it in. A $100 deposit applies to K-Tips and goes toward the total — but that's a "ready to book now" conversation, not something you volunteer.
 
 — HOW YOU SOUND —
 Warm, direct, short. Like a real person texting back between clients. No bullet points in replies. No paragraphs. One or two sentences. Vary your rhythm — some replies a few words, some a full sentence. Use contractions. Never say "Great question", "Absolutely", "Of course", "Certainly", "I'd be happy to". Never robotic, never salesy.
 
 ONE MESSAGE RULE: Always reply in exactly ONE message. Max 2 sentences. Say the most important thing and stop.
+
+NEVER INVENT SERVICES: Only offer what's on the menu above. If someone asks for something the salon doesn't do (tattoos, teeth whitening, injectable Botox, piercings, etc.), say honestly "we don't do that here" and point them to what we do offer — don't make up a price or pretend we do it. Note: "Hair Botox" is a hair treatment, NOT injectable Botox — don't confuse them.
 
 HARD STOPS:
 - Never confirm an appointment ("see you Friday", "see you soon") — that's not your call
@@ -184,6 +190,14 @@ function delayForReply(text) {
   return 45000;
 }
 
+// Did the customer write in Spanish recently? Used to match handoff language.
+function isSpanishConversation(userId) {
+  const recent = (conversations[userId] || []).filter(m => m.role === 'user').slice(-4);
+  const text = recent.map(m => m.content.toLowerCase()).join(' ');
+  const markers = [' que ', ' como ', ' cuanto', ' cuánto', ' para ', ' tengo', ' quiero', ' hola', ' gracias', ' precio', ' cabello', ' pelo ', ' cita', ' puedo', ' está', ' esta ', ' muy ', 'ñ', '¿', 'í', 'é'];
+  return markers.some(m => text.includes(m));
+}
+
 async function sendSenderAction(recipientId, action) {
   await axios.post(`https://graph.facebook.com/v19.0/${PAGE_ID}/messages`, {
     recipient: { id: recipientId },
@@ -234,10 +248,16 @@ async function getAIResponse(userId, userMessage, returning = false) {
 
     const reply = response.content[0].text.trim();
 
-    if (reply === 'NEEDS_HUMAN') {
+    // Catch NEEDS_HUMAN even when the model embeds it in a longer reply —
+    // never let the literal token leak to the customer.
+    if (/NEEDS_HUMAN/i.test(reply)) {
       const recent = conversations[userId].slice(-8).map(m => (m.role === 'user' ? 'Lead' : 'Agent') + ': ' + m.content).join('\n');
       await sendAlert('👀 NEEDS ATTENTION\n\nIG ID: ' + userId + '\n\n' + recent + '\n\nCheck DMs and take over.');
-      const handoff = "Let me confirm with Evelin and I'll get right back to you.";
+      // Match the handoff language to the conversation
+      const spanish = isSpanishConversation(userId);
+      const handoff = spanish
+        ? "Déjame confirmar con Evelin y te escribo enseguida."
+        : "Let me confirm with Evelin and I'll get right back to you.";
       conversations[userId].push({ role: 'assistant', content: handoff });
       handedOff.add(userId);
       return handoff;
