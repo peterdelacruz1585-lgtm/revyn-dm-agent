@@ -234,15 +234,48 @@ app.post('/webhook', async (req, res) => {
   const body = req.body;
   if (body.object !== 'instagram' && body.object !== 'page') return;
   for (const entry of body.entry || []) {
+    // Skip mention/tag events — never respond to tags or story mentions
+    if (entry.changes) {
+      console.log('[agent] page change/mention event — skipping');
+      continue;
+    }
     for (const event of entry.messaging || []) {
       const senderId = event.sender?.id;
-      // Skip image/attachment messages — never respond to media
-      if (event.message && event.message.attachments && event.message.attachments.length > 0) {
-        console.log('[agent] attachment received from', senderId, '— skipping');
+
+      // Skip reactions
+      if (event.reaction) {
+        console.log('[agent] reaction from', senderId, '— skipping');
         continue;
       }
+
+      // Skip story mentions and all attachments
+      if (event.message?.attachments?.length > 0) {
+        const types = event.message.attachments.map(a => a.type).join(',');
+        console.log('[agent] attachment/mention (' + types + ') from', senderId, '— skipping');
+        continue;
+      }
+
+      // Skip ad referral-only events (no message body)
+      if (event.referral && !event.message?.text) {
+        console.log('[agent] ad referral with no message from', senderId, '— skipping');
+        continue;
+      }
+
+      // Skip collaboration/template messages
+      if (event.message?.is_unsupported || event.message?.sticker_id) {
+        console.log('[agent] unsupported message type from', senderId, '— skipping');
+        continue;
+      }
+
       const messageText = event.message?.text;
       if (!senderId || !messageText || event.message?.is_echo) continue;
+
+      // Skip nonsense — too short or no real words
+      const cleaned = messageText.replace(/[^a-zA-Z]/g, '');
+      if (cleaned.length < 2) {
+        console.log('[agent] nonsense message from', senderId, '— skipping:', messageText);
+        continue;
+      }
       console.log('DM from ' + senderId + ': ' + messageText);
       const returning = await hasPriorEngagement(senderId);
       if (returning) console.log('Returning lead — re-engagement mode: ' + senderId);
