@@ -111,6 +111,7 @@ const REENGAGE_NOTE = `RETURNING LEAD: this person has messaged Chia Beauty Room
 
 const conversations = {};
 const messageCount = {};
+const handedOff = new Set(); // tracks users where NEEDS_HUMAN has fired — agent goes silent
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -177,6 +178,7 @@ async function getAIResponse(userId, userMessage, returning = false) {
       await sendAlert('👀 NEEDS ATTENTION\n\nIG ID: ' + userId + '\n\n' + recent + '\n\nCheck DMs and take over.');
       const handoff = "Let me confirm with Evelin and I'll get right back to you.";
       conversations[userId].push({ role: 'assistant', content: handoff });
+      handedOff.add(userId);
       return handoff;
     }
 
@@ -274,6 +276,11 @@ app.post('/webhook', async (req, res) => {
       const cleaned = messageText.replace(/[^a-zA-Z]/g, '');
       if (cleaned.length < 2) {
         console.log('[agent] nonsense message from', senderId, '— skipping:', messageText);
+        continue;
+      }
+      // Agent goes completely silent after NEEDS_HUMAN fires
+      if (handedOff.has(senderId)) {
+        console.log('[agent] already handed off — ignoring message from', senderId);
         continue;
       }
       console.log('DM from ' + senderId + ': ' + messageText);
