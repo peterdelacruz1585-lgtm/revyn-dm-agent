@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
@@ -12,6 +13,73 @@ const ALERT_RECIPIENT_ID = process.env.ALERT_RECIPIENT_ID;
 const PAGE_ID = process.env.PAGE_ID || 'me';
 
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+// ---- Postgres: conversation logging + persistent handoff state ----
+const pool = process.env.DATABASE_URL ? new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+}) : null;
+
+async function initDb() {
+  if (!pool) { console.log('[db] no DATABASE_URL — running without persistence'); return; }
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS conversations (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        message TEXT,
+        outcome TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS handoffs (
+        user_id TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    console.log('[db] tables ready');
+  } catch (e) {
+    console.error('[db] init error:', e.message);
+  }
+}
+
+async function logMessage(userId, direction, message, outcome = '') {
+  if (!pool) return;
+  try {
+    await pool.query(
+      'INSERT INTO conversations (user_id, direction, message, outcome) VALUES ($1, $2, $3, $4)',
+      [userId, direction, (message || '').substring(0, 1000), outcome]
+    );
+  } catch (e) {
+    console.error('[db] log error:', e.message);
+  }
+}
+
+// Persistent handoff state — survives restarts. Falls back to in-memory Set if no DB.
+async function markHandedOff(userId) {
+  handedOff.add(userId);
+  if (!pool) return;
+  try {
+    await pool.query('INSERT INTO handoffs (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING', [userId]);
+  } catch (e) {
+    console.error('[db] handoff write error:', e.message);
+  }
+}
+
+async function isHandedOff(userId) {
+  if (handedOff.has(userId)) return true;
+  if (!pool) return false;
+  try {
+    const res = await pool.query('SELECT 1 FROM handoffs WHERE user_id = $1', [userId]);
+    if (res.rowCount > 0) { handedOff.add(userId); return true; }
+    return false;
+  } catch (e) {
+    console.error('[db] handoff read error:', e.message);
+    return false;
+  }
+}
 
 const SYSTEM_PROMPT = `You work at Chia Beauty Room in Somerset, NJ. You answer Instagram DMs. You are a real person on the team — never say or imply you're a bot or AI. If asked directly: "haha no it's me, just busy at the studio. what were you thinking?"
 
@@ -278,7 +346,7 @@ async function getAIResponse(userId, userMessage, returning = false) {
         ? "Déjame confirmar con Evelin y te escribo enseguida."
         : "Let me confirm with Evelin and I'll get right back to you.";
       conversations[userId].push({ role: 'assistant', content: handoff });
-      handedOff.add(userId);
+      await markHandedOff(userId);
       return handoff;
     }
 
@@ -378,18 +446,22 @@ app.post('/webhook', async (req, res) => {
         console.log('[agent] nonsense message from', senderId, '— skipping:', messageText);
         continue;
       }
-      // Agent goes completely silent after NEEDS_HUMAN fires
-      if (handedOff.has(senderId)) {
+      // Agent goes completely silent after NEEDS_HUMAN fires (persisted across restarts)
+      if (await isHandedOff(senderId)) {
         console.log('[agent] already handed off — ignoring message from', senderId);
+        await logMessage(senderId, 'IN', messageText, 'IGNORED_POST_HANDOFF');
         continue;
       }
       console.log('DM from ' + senderId + ': ' + messageText);
+      await logMessage(senderId, 'IN', messageText);
       const returning = await hasPriorEngagement(senderId);
       if (returning) console.log('Returning lead — re-engagement mode: ' + senderId);
       const startTs = Date.now();
       await sleep(2000 + Math.floor(Math.random() * 3000));
       await sendSenderAction(senderId, 'mark_seen').catch(() => {});
       const reply = await getAIResponse(senderId, messageText, returning);
+      const outcome = handedOff.has(senderId) ? 'HANDOFF' : '';
+      await logMessage(senderId, 'OUT', reply, outcome);
       const bubbles = toBubbles(reply);
       for (let i = 0; i < bubbles.length; i++) {
         const b = bubbles[i];
@@ -420,4 +492,7 @@ app.get('/data-deletion', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Agent running on port ' + PORT));
+app.listen(PORT, async () => {
+  console.log('Agent running on port ' + PORT);
+  await initDb();
+});
