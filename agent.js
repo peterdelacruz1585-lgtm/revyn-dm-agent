@@ -57,6 +57,28 @@ async function logMessage(userId, direction, message, outcome = '') {
   }
 }
 
+// Load prior conversation from DB so returning leads keep full context across restarts.
+// Without this the agent forgets everything on every redeploy and re-asks answered questions.
+async function loadHistory(userId) {
+  if (!pool) return [];
+  try {
+    const res = await pool.query(
+      `SELECT direction, message FROM conversations
+       WHERE user_id = $1 AND message IS NOT NULL AND message <> ''
+         AND direction IN ('IN', 'OUT')
+       ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    );
+    return res.rows.reverse().map(r => ({
+      role: r.direction === 'IN' ? 'user' : 'assistant',
+      content: r.message
+    }));
+  } catch (e) {
+    console.error('[db] history load error:', e.message);
+    return [];
+  }
+}
+
 // Persistent handoff state — survives restarts. Falls back to in-memory Set if no DB.
 async function markHandedOff(userId) {
   handedOff.add(userId);
@@ -112,7 +134,7 @@ EXTENSIONS (Evelin's specialty):
 - Tape Hair Extension Combo: $599 — includes hair, install, 3 hours
 - Classic Extension Per Line: $40+ per line
 - K-Tip Move-Up / Reinstall: $1,099 (removal + reinstall, every 4–6 months)
-- Free 10-min consultation for all extension clients
+- Free 15-min consultation for all extension clients
 
 HAIR COLOR — always quote color as "starts at" since the final price depends on hair length, thickness, and what they want. Every color service includes a wash and blowout, so they walk out finished and styled, not wet. Lead with that — it's real value built in.
 - Balayage: starts at $250, about 2 hours — soft, lived-in, sun-kissed blend, includes a wash and blowout
@@ -182,7 +204,7 @@ Common questions answered correctly:
 "How do I take care of the K-Tips?" → "You get a special K-Tip brush with your install, and she walks you through everything in person so you leave knowing exactly what to do. It's easy once you've got the routine."
 
 — THE CONSULT —
-Free, 10 minutes, in-person. No commitment, no pressure. Evelin looks at the hair and maps out exactly what she'd do. This is what you're booking for extensions and anything where they need guidance.
+Free, 15 minutes, in-person. No commitment, no pressure. Evelin looks at the hair and maps out exactly what she'd do. This is what you're booking for extensions and anything where they need guidance.
 
 — BOOKING —
 Online: https://chiabeautyroom.glossgenius.com/booking-flow
@@ -203,6 +225,8 @@ SOUND HUMAN — this is the whole game. You are a busy person at a salon, not a 
 - React before you pivot. "ohh love that" then the info, like a real person would.
 
 STAY RELEVANT — always answer what they actually asked before steering anywhere. Never dodge a real question with a consult pitch. If they ask "will it damage my hair," answer it, THEN you can mention the consult. Deflecting reads as evasive and fake.
+
+ANSWER DIRECT QUESTIONS IMMEDIATELY — if someone asks a simple factual question (hours, what time you open, address, phone, "do you do X"), just answer it plainly and completely. "what time do you open tomorrow?" → give the actual hours for that day ("we open at 9 tomorrow" — Mon–Tue 9:30, Wed–Fri 9, Sat 8, closed Sun). NEVER answer a direct question with another question, and NEVER say "what can I help you with" / "how can I help" / "what were you looking for" to someone who already told you or already asked something. They gave you context — use it. Answer first, steer second (or don't steer at all if it's a quick factual ask).
 
 SENSITIVE SITUATIONS — if someone mentions hair loss, illness (chemo, alopecia, medical), a hard life moment, or anything vulnerable, drop the sales energy completely. Lead with warmth and humanity first. Don't pitch, don't quote a price unless they ask. Gently say the best step is to come see Evelin in person so she can look and figure out what actually works for them — and trigger NEEDS_HUMAN so a real person handles it with care. Never make someone in a vulnerable spot feel like a sales target.
 
@@ -266,20 +290,28 @@ Respond with EXACTLY: NEEDS_HUMAN
 - They're frustrated or complaining
 - 8+ messages with no progress`;
 
-const REENGAGE_NOTE = `RETURNING LEAD: this person has messaged Chia Beauty Room before — they're coming back, not brand new. Pick up warm and familiar, like you remember them ("hey, good to hear from you" / "glad you reached back out"). Don't make them re-explain everything or re-qualify from scratch — they already showed interest. Move warmly and efficiently toward booking the free consult. If they went quiet before, pick back up naturally without being pushy.`;
+const REENGAGE_NOTE = `RETURNING LEAD: this person has messaged Chia Beauty Room before — they're coming back, not brand new. The earlier messages are in this conversation history above — READ THEM before you reply. Never re-ask something they already told you and never re-answer something you already answered ("what are you looking for?" when they already said K-tips makes you look broken). Pick up warm and familiar, like you remember them ("hey! good to hear from you" / "glad you came back").
+
+USE THE PAST CONVERSATION AS A SELLING TOOL — reference what they wanted last time and build on it. If they asked about K-tips before but didn't book, reopen on that exact thing ("you were asking about the K-tips last time — still thinking about it? 💛"). If they had a specific concern (price, damage, length), address that they came back despite it and move them forward. Their return IS buying signal — they've been thinking about it. Meet that warmly and steer efficiently to the free 15-min consult. Don't be pushy, but don't waste their return acting like a stranger.`;
+
+const AD_LEAD_NOTE = `AD LEAD: this person just clicked the K-Tip extensions ad and messaged you — they are ALREADY interested in K-Tip extensions. Do NOT open with "what can I help you with" / "what were you thinking" / "how can I help" as if they're a blank slate — that's a known mistake here. They came for K-Tips. Open warm and assume the topic ("heyy! love that you reached out about the K-tips 💛"). If their first message is just a keyword like "HAIR", "info", or "Can you tell me more", treat it as "I'm interested in K-Tip extensions" and go straight into helping them — react, then move toward booking the free 15-min consult.`;
 
 const conversations = {};
 const messageCount = {};
 const handedOff = new Set(); // tracks users where NEEDS_HUMAN has fired — agent goes silent
+const adLeads = new Set(); // tracks users who arrived via an ad — they're already K-Tip interested
+
+// Ad keyword CTAs (e.g. "DM us HAIR") — a lone keyword means an ad lead, not a real question
+const AD_KEYWORDS = new Set(['hair', 'info', 'consult', 'consultation']);
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function delayForReply(text) {
   const n = text.length;
-  if (n < 80) return 20000;
-  if (n < 200) return 30000;
-  if (n < 350) return 38000;
-  return 45000;
+  if (n < 80) return 35000;
+  if (n < 200) return 55000;
+  if (n < 350) return 70000;
+  return 85000;
 }
 
 // Did the customer write in Spanish recently? Used to match handoff language.
@@ -323,18 +355,22 @@ async function sendMessage(recipientId, message) {
   }
 }
 
-async function getAIResponse(userId, userMessage, returning = false) {
+async function getAIResponse(userId, userMessage, returning = false, fromAd = false) {
   if (!conversations[userId]) conversations[userId] = [];
   if (!messageCount[userId]) messageCount[userId] = 0;
   conversations[userId].push({ role: 'user', content: userMessage });
   messageCount[userId]++;
   if (conversations[userId].length > 24) conversations[userId] = conversations[userId].slice(-24);
 
+  let system = SYSTEM_PROMPT;
+  if (returning) system += '\n\n' + REENGAGE_NOTE;
+  if (fromAd) system += '\n\n' + AD_LEAD_NOTE;
+
   try {
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 160,
-      system: returning ? (SYSTEM_PROMPT + '\n\n' + REENGAGE_NOTE) : SYSTEM_PROMPT,
+      system,
       messages: conversations[userId]
     });
 
@@ -430,9 +466,14 @@ app.post('/webhook', async (req, res) => {
         continue;
       }
 
-      // Skip ad referral-only events (no message body)
+      // Ad referral: mark this lead as an ad lead so the AI knows they're already
+      // K-Tip interested. Referral-only events (no message body yet) we still skip replying to.
+      if (event.referral || event.message?.referral || event.postback?.referral) {
+        adLeads.add(senderId);
+        console.log('[agent] ad referral from', senderId, '— flagged as ad lead');
+      }
       if (event.referral && !event.message?.text) {
-        console.log('[agent] ad referral with no message from', senderId, '— skipping');
+        console.log('[agent] ad referral with no message from', senderId, '— skipping reply');
         continue;
       }
 
@@ -458,13 +499,27 @@ app.post('/webhook', async (req, res) => {
         continue;
       }
       console.log('DM from ' + senderId + ': ' + messageText);
+      // Rehydrate prior conversation from DB before logging the new message, so a returning
+      // lead keeps full context even after a restart. Runs before logMessage to avoid duping
+      // the current message into history.
+      if (!conversations[senderId]) {
+        const hist = await loadHistory(senderId);
+        if (hist.length) {
+          conversations[senderId] = hist;
+          console.log('[agent] hydrated ' + hist.length + ' prior msgs for ' + senderId);
+        }
+      }
       await logMessage(senderId, 'IN', messageText);
+      // A lone ad-keyword (e.g. "HAIR" from the "DM us HAIR" CTA) also marks an ad lead
+      if (AD_KEYWORDS.has(messageText.trim().toLowerCase())) adLeads.add(senderId);
+      const fromAd = adLeads.has(senderId);
+      if (fromAd) console.log('Ad lead — K-Tip interested: ' + senderId);
       const returning = await hasPriorEngagement(senderId);
       if (returning) console.log('Returning lead — re-engagement mode: ' + senderId);
       const startTs = Date.now();
       await sleep(2000 + Math.floor(Math.random() * 3000));
       await sendSenderAction(senderId, 'mark_seen').catch(() => {});
-      const reply = await getAIResponse(senderId, messageText, returning);
+      const reply = await getAIResponse(senderId, messageText, returning, fromAd);
       const outcome = handedOff.has(senderId) ? 'HANDOFF' : '';
       await logMessage(senderId, 'OUT', reply, outcome);
       const bubbles = toBubbles(reply);
