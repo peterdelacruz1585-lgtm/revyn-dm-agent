@@ -306,11 +306,29 @@ const messageCount = {};
 const handedOff = new Set(); // tracks users where NEEDS_HUMAN has fired — agent goes silent
 const adLeads = new Set(); // tracks users who arrived via an ad — they're already K-Tip interested
 const names = {}; // cached first names per user for personal replies
+const inboundSeq = {}; // userId -> latest inbound message #; used to drop stale replies
+const sentLog = {}; // userId -> timestamps of recently sent messages (rate limiting)
 
 // Ad keyword CTAs (e.g. "DM us HAIR") — a lone keyword means an ad lead, not a real question
 const AD_KEYWORDS = new Set(['hair', 'info', 'consult', 'consultation']);
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Rate limit: never send more than MAX messages per WINDOW to one person. If we'd exceed it,
+// wait until the window clears. Stops the agent from spamming/spooking a lead at the close.
+const RATE_WINDOW_MS = 20000;
+const RATE_MAX = 2;
+async function rateLimitGate(userId) {
+  if (!sentLog[userId]) sentLog[userId] = [];
+  const now = Date.now();
+  sentLog[userId] = sentLog[userId].filter(t => now - t < RATE_WINDOW_MS);
+  if (sentLog[userId].length >= RATE_MAX) {
+    const waitMs = RATE_WINDOW_MS - (now - sentLog[userId][0]) + 250;
+    console.log('[agent] rate limit hit for ' + userId + ' — waiting ' + waitMs + 'ms');
+    await sleep(waitMs);
+    return rateLimitGate(userId);
+  }
+}
 
 function delayForReply(text) {
   const n = text.length;
@@ -404,7 +422,7 @@ async function getAIResponse(userId, userMessage, returning = false, fromAd = fa
       : `Perfect${name ? ', ' + name : ''} — you're all set! We've got a spot for you and we'll get you booked in.`;
     conversations[userId].push({ role: 'assistant', content: closing });
     await markHandedOff(userId);
-    return closing;
+    return { text: closing, logged: true, stop: true };
   }
 
   let system = SYSTEM_PROMPT;
@@ -434,7 +452,7 @@ async function getAIResponse(userId, userMessage, returning = false, fromAd = fa
         : "Give me one sec and I'll get this sorted for you.";
       conversations[userId].push({ role: 'assistant', content: handoff });
       await markHandedOff(userId);
-      return handoff;
+      return { text: handoff, logged: true, stop: true };
     }
 
     if (reply.includes('buy.stripe.com')) {
@@ -442,11 +460,12 @@ async function getAIResponse(userId, userMessage, returning = false, fromAd = fa
       await sendAlert('💰 DEPOSIT LINK SENT\n\nIG ID: ' + userId + '\n\n' + recent + '\n\nConfirm their slot once the deposit lands.');
     }
 
-    conversations[userId].push({ role: 'assistant', content: reply });
-    return reply;
+    // Don't log the assistant reply to history yet — the caller logs it only if it's
+    // actually sent (a stale reply gets dropped without polluting the conversation).
+    return { text: reply, logged: false, stop: false };
   } catch (err) {
     console.error('Claude error:', err.message);
-    return "Hey — thanks for reaching out. Give me one sec and I'll be right with you.";
+    return { text: "Hey — thanks for reaching out. Give me one sec and I'll be right with you.", logged: false, stop: false };
   }
 }
 
@@ -472,12 +491,6 @@ async function hasPriorEngagement(senderId) {
     console.log('Prior-engagement check failed (treating as NEW lead):', e.response?.data?.error?.message || e.message);
     return false;
   }
-}
-
-function toBubbles(reply) {
-  const parts = [reply.trim()];
-  if (parts.length <= 1) return [reply.trim()];
-  return parts.slice(0, 2);
 }
 
 app.get('/webhook', (req, res) => {
@@ -545,6 +558,9 @@ app.post('/webhook', async (req, res) => {
         continue;
       }
       console.log('DM from ' + senderId + ': ' + messageText);
+      // Bump this user's inbound counter. If a newer message arrives while we're composing
+      // a reply, this seq won't match the latest and the reply gets dropped (relevance check).
+      const seq = inboundSeq[senderId] = (inboundSeq[senderId] || 0) + 1;
       // Rehydrate prior conversation from DB before logging the new message, so a returning
       // lead keeps full context even after a restart. Runs before logMessage to avoid duping
       // the current message into history.
@@ -567,22 +583,47 @@ app.post('/webhook', async (req, res) => {
       const startTs = Date.now();
       await sleep(2000 + Math.floor(Math.random() * 3000));
       await sendSenderAction(senderId, 'mark_seen').catch(() => {});
-      const reply = await getAIResponse(senderId, messageText, returning, fromAd, name);
-      const outcome = handedOff.has(senderId) ? 'HANDOFF' : '';
-      await logMessage(senderId, 'OUT', reply, outcome);
-      const bubbles = toBubbles(reply);
-      for (let i = 0; i < bubbles.length; i++) {
-        const b = bubbles[i];
-        const target = delayForReply(b);
-        const wait = (i === 0) ? Math.max(0, target - (Date.now() - startTs)) : target;
-        const typeMs = Math.min(3500, wait);
-        const thinkMs = wait - typeMs;
-        if (thinkMs > 0) await sleep(thinkMs);
-        await sendSenderAction(senderId, 'typing_on').catch(() => {});
-        await sleep(typeMs);
-        await sendMessage(senderId, b);
-        console.log('Replied (' + b.length + ' chars): ' + b);
+
+      // If the lead already sent another message while we were getting ready, skip generating
+      // a reply for this older one — record it for context and let the newest message answer.
+      if (inboundSeq[senderId] !== seq) {
+        if (conversations[senderId]) conversations[senderId].push({ role: 'user', content: messageText });
+        console.log('[agent] superseded before reply — recorded only: ' + senderId);
+        continue;
       }
+
+      const result = await getAIResponse(senderId, messageText, returning, fromAd, name);
+      const text = result.text;
+      const target = delayForReply(text);
+      const wait = Math.max(0, target - (Date.now() - startTs));
+      const typeMs = Math.min(3500, wait);
+      const thinkMs = wait - typeMs;
+      if (thinkMs > 0) await sleep(thinkMs);
+
+      // RELEVANCE CHECK before sending: if a newer message came in while we composed/waited,
+      // this reply is stale — drop it rather than spam the lead. (Stop/handoff messages always send.)
+      if (!result.stop && inboundSeq[senderId] !== seq) {
+        console.log('[agent] stale reply DROPPED for ' + senderId + ' (superseded by newer message)');
+        await logMessage(senderId, 'OUT', text, 'DROPPED_STALE');
+        continue;
+      }
+
+      // RATE LIMIT: max 2 sends per 20s per user. Waits if needed, then re-checks relevance.
+      await rateLimitGate(senderId);
+      if (!result.stop && inboundSeq[senderId] !== seq) {
+        console.log('[agent] stale reply DROPPED after rate wait for ' + senderId);
+        await logMessage(senderId, 'OUT', text, 'DROPPED_STALE');
+        continue;
+      }
+
+      await sendSenderAction(senderId, 'typing_on').catch(() => {});
+      await sleep(typeMs);
+      await sendMessage(senderId, text);
+      (sentLog[senderId] = sentLog[senderId] || []).push(Date.now());
+      if (!result.logged) conversations[senderId].push({ role: 'assistant', content: text });
+      const outcome = handedOff.has(senderId) ? 'HANDOFF' : '';
+      await logMessage(senderId, 'OUT', text, outcome);
+      console.log('Replied (' + text.length + ' chars): ' + text);
     }
   }
 });
