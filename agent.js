@@ -164,6 +164,7 @@ EXTENSIONS (Evelin's specialty):
 - Classic Extension Per Line: $40+ per line
 - K-Tip Move-Up / Reinstall: $1,099 (removal + reinstall, every 4–6 months)
 - Hybrid / Partial Installs: yes, we do these. Pricing depends on how much hair you actually need, which is exactly what the free in-person consult is for — we look at your hair, see exactly what you need, and go over pricing right there. The good thing is the 15-minute consult is completely free. When someone asks about hybrid or partial, don't guess a number — tell them that's what the free consult figures out, and that we have a spot.
+  CRITICAL: "hybrid install," "partial install," "invisible part," "fill," "move-up," or anyone talking about install / extensions / their existing extensions = HAIR extensions, NOT lashes. Lashes ALSO have a "hybrid" style — do NOT confuse them. If the topic is install/extensions/hair, it is hair extensions, full stop.
 - Free 15-min consultation for all extension clients
 
 HAIR COLOR — always quote color as "starts at" since the final price depends on hair length, thickness, and what they want. Every color service includes a wash and blowout, so they walk out finished and styled, not wet. Lead with that — it's real value built in.
@@ -313,8 +314,9 @@ SPANISH objections:
 Respond with EXACTLY: NEEDS_HUMAN
 (nothing else) when:
 - You have their name, number, and any day or timeframe (even "Friday" or "weekends")
-- They're ready to book or say they want to come in
-- They ask about a specific date or time
+- NUMBER-FIRST RULE: for a booking, NEVER hand off until you have their phone number. If they're ready, gave a name, or named a day but you don't have a number yet, ASK FOR THE NUMBER — do not trigger NEEDS_HUMAN. A booking handoff without a number is a failure. (Frustration / specialty / out-of-scope handoffs below are exempt — those hand off regardless.)
+- They're ready to book or say they want to come in (only after you have their number)
+- They ask about a specific date or time (only after you have their number)
 - They sent the deposit link
 - Specialty situation (severe damage, color correction, very short/thin hair)
 - They ask ANYTHING not explicitly covered in this prompt, or you're unsure of the answer — hand off instead of guessing
@@ -376,17 +378,23 @@ function isSpanishConversation(userId) {
   return markers.some(m => text.includes(m));
 }
 
-// Fetch the lead's first name so the agent can address them personally.
-// Prefers display name's first token; falls back to a username only if it reads like a name.
+// Fetch the lead's first name so the agent can address them personally — but ONLY when it
+// looks like a real human name. IG display names are often handles ("Soylouisanny", "Jflowers")
+// or junk ("Hair"); using those is worse than no name. We require a "First Last" style display
+// name and take the first token. Single-word display names and usernames are skipped on purpose.
 async function getUserName(userId) {
   try {
     const res = await axios.get(`https://graph.facebook.com/v19.0/${userId}`, {
-      params: { fields: 'name,username', access_token: PAGE_ACCESS_TOKEN }
+      params: { fields: 'name', access_token: PAGE_ACCESS_TOKEN }
     });
     const display = (res.data?.name || '').trim();
-    if (display) return display.split(/\s+/)[0];
-    const handle = (res.data?.username || '').trim();
-    if (handle && /^[a-zA-Z]{2,}$/.test(handle)) return handle;
+    if (!display) return '';
+    const parts = display.split(/\s+/);
+    const first = parts[0];
+    // Need 2+ words (real-name format) and a clean alphabetic first token.
+    if (parts.length >= 2 && /^[A-Za-zÀ-ÿ'’.-]{2,15}$/.test(first)) {
+      return first.charAt(0).toUpperCase() + first.slice(1);
+    }
     return '';
   } catch (e) {
     console.log('Name fetch failed:', e.response?.data?.error?.message || e.message);
