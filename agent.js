@@ -5,12 +5,16 @@ const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'revyn_verify_token';
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ALERT_RECIPIENT_ID = process.env.ALERT_RECIPIENT_ID;
 const PAGE_ID = process.env.PAGE_ID || 'me';
+const ADMIN_KEY = process.env.ADMIN_KEY; // password for the on/off control page
+
+let agentEnabled = true; // master on/off switch; persisted in bot_settings, controllable from /admin
 
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
@@ -39,7 +43,15 @@ async function initDb() {
         created_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-    console.log('[db] tables ready');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bot_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    `);
+    const s = await pool.query(`SELECT value FROM bot_settings WHERE key = 'enabled'`);
+    if (s.rowCount > 0) agentEnabled = s.rows[0].value === 'true';
+    console.log('[db] tables ready — agent is ' + (agentEnabled ? 'LIVE' : 'PAUSED'));
   } catch (e) {
     console.error('[db] init error:', e.message);
   }
@@ -76,6 +88,21 @@ async function loadHistory(userId) {
   } catch (e) {
     console.error('[db] history load error:', e.message);
     return [];
+  }
+}
+
+// Master on/off — persisted so it survives restarts. Controlled from the /admin page.
+async function setEnabled(val) {
+  agentEnabled = val;
+  if (!pool) return;
+  try {
+    await pool.query(
+      `INSERT INTO bot_settings (key, value) VALUES ('enabled', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1`,
+      [String(val)]
+    );
+  } catch (e) {
+    console.error('[db] setEnabled error:', e.message);
   }
 }
 
@@ -551,6 +578,12 @@ app.post('/webhook', async (req, res) => {
         console.log('[agent] nonsense message from', senderId, '— skipping:', messageText);
         continue;
       }
+      // Master switch: when paused from /admin, capture the DM but never reply
+      if (!agentEnabled) {
+        console.log('[agent] PAUSED — logging but not replying to', senderId);
+        await logMessage(senderId, 'IN', messageText, 'AGENT_OFF');
+        continue;
+      }
       // Agent goes completely silent after NEEDS_HUMAN fires (persisted across restarts)
       if (await isHandedOff(senderId)) {
         console.log('[agent] already handed off — ignoring message from', senderId);
@@ -629,6 +662,52 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('Profit Pilots DM Agent is live'));
+
+// ---- Control page: open /admin?key=YOUR_ADMIN_KEY on your phone to pause/resume ----
+function renderAdmin(key) {
+  const on = agentEnabled;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Revyn Control</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:480px;margin:0 auto;padding:48px 24px;text-align:center;background:#0A0A0A;color:#fff}
+  h1{font-size:22px;font-weight:800;letter-spacing:.5px}
+  .status{font-size:40px;font-weight:900;margin:28px 0;color:${on ? '#16a34a' : '#dc2626'}}
+  button{font-size:20px;font-weight:800;padding:20px;border:0;border-radius:16px;margin:8px 0;cursor:pointer;width:100%}
+  .pause{background:#dc2626;color:#fff}
+  .resume{background:#16a34a;color:#fff}
+  .note{color:#888;font-size:13px;margin-top:32px;line-height:1.5}
+  .gold{color:#F5C518;font-weight:700}
+</style></head><body>
+  <h1>REVYN — CHIA DM AGENT</h1>
+  <div class="status">${on ? '● LIVE' : '● PAUSED'}</div>
+  <form method="POST" action="/admin/set">
+    <input type="hidden" name="key" value="${key}">
+    <input type="hidden" name="value" value="false">
+    <button class="pause">Pause Agent</button>
+  </form>
+  <form method="POST" action="/admin/set">
+    <input type="hidden" name="key" value="${key}">
+    <input type="hidden" name="value" value="true">
+    <button class="resume">Resume Agent</button>
+  </form>
+  <div class="note">Bookmark this page. When <span class="gold">PAUSED</span>, the agent still logs incoming DMs but never replies — so you can take over by hand.</div>
+</body></html>`;
+}
+
+app.get('/admin', (req, res) => {
+  if (!ADMIN_KEY) return res.status(503).send('Set the ADMIN_KEY environment variable on Railway first.');
+  if (req.query.key !== ADMIN_KEY) return res.status(403).send('Forbidden');
+  res.setHeader('Content-Type', 'text/html');
+  res.send(renderAdmin(req.query.key));
+});
+
+app.post('/admin/set', async (req, res) => {
+  if (!ADMIN_KEY || req.body.key !== ADMIN_KEY) return res.status(403).send('Forbidden');
+  await setEnabled(req.body.value === 'true');
+  console.log('[admin] agent set to ' + (agentEnabled ? 'LIVE' : 'PAUSED'));
+  res.redirect('/admin?key=' + encodeURIComponent(req.body.key));
+});
 
 app.get('/privacy', (req, res) => {
   res.setHeader('Content-Type', 'text/html');
