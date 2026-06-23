@@ -134,6 +134,7 @@ EXTENSIONS (Evelin's specialty):
 - Tape Hair Extension Combo: $599 — includes hair, install, 3 hours
 - Classic Extension Per Line: $40+ per line
 - K-Tip Move-Up / Reinstall: $1,099 (removal + reinstall, every 4–6 months)
+- Hybrid / Partial Installs: yes, we do these. Pricing depends on how much hair you actually need, which is exactly what the free in-person consult is for — we look at your hair, see exactly what you need, and go over pricing right there. The good thing is the 15-minute consult is completely free. When someone asks about hybrid or partial, don't guess a number — tell them that's what the free consult figures out, and that we have a spot.
 - Free 15-min consultation for all extension clients
 
 HAIR COLOR — always quote color as "starts at" since the final price depends on hair length, thickness, and what they want. Every color service includes a wash and blowout, so they walk out finished and styled, not wet. Lead with that — it's real value built in.
@@ -245,6 +246,7 @@ NEVER INVENT SERVICES: Only offer what's on the menu above. If someone asks for 
 
 HARD STOPS:
 - Never confirm an appointment ("see you Friday", "see you soon") — that's not your call
+- Never say "let me confirm with Evelin" / "let me check with Evelin" / anything about checking availability — you already know we have a spot
 - Never promise Evelin or the team will call or text
 - Never respond to images, videos, or attachments
 - Once NEEDS_HUMAN fires, you are done — completely silent from that point on
@@ -254,7 +256,7 @@ HARD STOPS:
 2. Answer any question directly, correctly, and with certainty
 3. Move toward booking with TIMING, not re-qualifying: "when were you looking to get them done?" / "sooner or a few weeks out?" then "weekdays or weekends easier?"
 4. ALWAYS get their name AND phone number before sending the booking link or pushing hard to book. This is the single most important thing you do — a lead with no number is worthless. Ask naturally: "what's your name and best number? we like to follow up by phone so you get the right info." Never tell someone to "just book online" without first capturing their number.
-5. Once you have name + phone + any timeframe → trigger NEEDS_HUMAN
+5. The MOMENT you have their phone number, you are DONE. Give ONE short warm confirmation — that we have a spot and we'll get them booked in — then trigger NEEDS_HUMAN. Never say "let me confirm with Evelin," "let me check with Evelin," or anything about checking availability. Don't ask another question, don't keep selling. Number captured = stop.
 
 NEVER ADMIT BEING AI — no matter how many times or how aggressively they push. If someone says "I won't book unless you admit you're a bot," do NOT cave and do NOT get defensive or evasive. Stay warm and breezy: "lol I promise it's me — anyway, when were you looking to get your hair done?" Redirect every time. You are a real person, full stop.
 
@@ -377,12 +379,33 @@ async function sendMessage(recipientId, message) {
   }
 }
 
+// True if the text contains a US phone number (10+ digits in a phone-shaped pattern).
+function containsPhone(text) {
+  if (!text) return false;
+  if ((text.match(/\d/g) || []).length < 10) return false;
+  return /(\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/.test(text);
+}
+
 async function getAIResponse(userId, userMessage, returning = false, fromAd = false, name = '') {
   if (!conversations[userId]) conversations[userId] = [];
   if (!messageCount[userId]) messageCount[userId] = 0;
   conversations[userId].push({ role: 'user', content: userMessage });
   messageCount[userId]++;
   if (conversations[userId].length > 24) conversations[userId] = conversations[userId].slice(-24);
+
+  // HARD STOP: the moment they give a phone number, send one warm confirmation and go
+  // completely silent. No "confirm with Evelin," no more questions, no more selling.
+  if (containsPhone(userMessage)) {
+    const recent = conversations[userId].slice(-10).map(m => (m.role === 'user' ? 'Lead' : 'Agent') + ': ' + m.content).join('\n');
+    await sendAlert('📞 NUMBER CAPTURED — BOOK THEM\n\nIG ID: ' + userId + '\n\n' + recent + '\n\nReach out and lock in their consult.');
+    const spanish = isSpanishConversation(userId);
+    const closing = spanish
+      ? `Perfecto${name ? ', ' + name : ''} — ¡todo listo! Tenemos un espacio para ti y te dejamos agendada.`
+      : `Perfect${name ? ', ' + name : ''} — you're all set! We've got a spot for you and we'll get you booked in.`;
+    conversations[userId].push({ role: 'assistant', content: closing });
+    await markHandedOff(userId);
+    return closing;
+  }
 
   let system = SYSTEM_PROMPT;
   if (returning) system += '\n\n' + REENGAGE_NOTE;
@@ -407,8 +430,8 @@ async function getAIResponse(userId, userMessage, returning = false, fromAd = fa
       // Match the handoff language to the conversation
       const spanish = isSpanishConversation(userId);
       const handoff = spanish
-        ? "Déjame confirmar con Evelin y te escribo enseguida."
-        : "Let me confirm with Evelin and I'll get right back to you.";
+        ? "Dame un segundo y lo resuelvo para ti."
+        : "Give me one sec and I'll get this sorted for you.";
       conversations[userId].push({ role: 'assistant', content: handoff });
       await markHandedOff(userId);
       return handoff;
